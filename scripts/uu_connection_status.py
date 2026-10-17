@@ -80,7 +80,7 @@ def summarize(log_dir: Path) -> tuple[list[str], int]:
 
     stream_log, report, completed_at = reports[-1]
     matching_server_log = stream_log.with_name(
-        stream_log.name.removeprefix("streamer_")
+        stream_log.name[len("streamer_"):]
     )
     server_log = (
         matching_server_log

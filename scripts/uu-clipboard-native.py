@@ -21,6 +21,46 @@ import time
 from PIL import Image
 from Xlib import X, Xatom, display, protocol
 from Xlib.ext import xfixes
+from Xlib.protocol import rq
+
+
+# Ubuntu 20.04's python-xlib implements XFixes cursor requests only. Supply
+# the XFixes selection wire structures locally without changing system Xlib.
+class CompatSelectionNotify(rq.Event):
+    _code = None
+    _fields = rq.Struct(rq.Card8("type"), rq.Card8("sub_code"),
+                        rq.Card16("sequence_number"), rq.Window("window"),
+                        rq.Window("owner"), rq.Card32("selection"),
+                        rq.Card32("timestamp"), rq.Card32("selection_timestamp"),
+                        rq.Pad(8))
+
+
+class CompatSelectionOwnerNotify(CompatSelectionNotify):
+    pass
+
+
+class CompatSelectSelectionInput(rq.Request):
+    _request = rq.Struct(rq.Card8("opcode"), rq.Opcode(2), rq.RequestLength(),
+                         rq.Window("window"), rq.Card32("selection"), rq.Card32("mask"))
+
+
+SelectionNotify = getattr(xfixes, "SelectionNotify", CompatSelectionNotify)
+
+
+def watch_selection(connection, window, selection):
+    connection.xfixes_query_version()
+    if hasattr(connection, "xfixes_select_selection_input"):
+        connection.xfixes_select_selection_input(window, selection, 7)
+    else:
+        info = connection.query_extension("XFIXES")
+        if not info.present:
+            raise RuntimeError("XFixes selection notifications are unavailable")
+        # All three subtypes share this layout. Register the entire event;
+        # old python-xlib's subevent decoder uses Python 2's ord(bytes[index]).
+        connection.extension_add_event(info.first_event, CompatSelectionOwnerNotify)
+        CompatSelectSelectionInput(display=connection.display,
+                                   opcode=connection.display.get_extension_major("XFIXES"),
+                                   window=window, selection=selection, mask=7)
 
 MAGIC = 0x43425555
 MAX_BYTES = 64 * 1024 * 1024
@@ -309,8 +349,7 @@ class Clipboard:
         self.file_progress = None
         self.progress_file = status_file.with_name("clipboard-transfer.json")
         self.last_progress = 0
-        self.d.xfixes_query_version()
-        self.d.xfixes_select_selection_input(self.window, self.clip, 7)
+        watch_selection(self.d, self.window, self.clip)
         self.d.flush()
 
     def record(self, data):
@@ -494,7 +533,7 @@ class Clipboard:
         return None
 
     def event(self, event):
-        if isinstance(event, xfixes.SelectionNotify):
+        if isinstance(event, SelectionNotify):
             if event.selection == self.clip and event.owner != self.window:
                 if self.file_transfer:
                     self.file_abort("Cancelled because a new native clipboard copy replaced the files")

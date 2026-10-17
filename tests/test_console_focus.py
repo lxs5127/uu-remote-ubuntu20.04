@@ -205,8 +205,20 @@ case "$*" in
   *search*gameviewer*)
     printf '100\\n200\\n'
     [[ "$FOCUS_TEST_MODE" != hidden-with-managed ]] || printf '400\\n';;
-  *search*TigerVNC*) printf '300\\n';;
+  *search*TigerVNC*)
+    if [[ "$DISPLAY" == :99 ]]; then
+      [[ "$FOCUS_TEST_MODE" == tiger-vnc ]] || exit 1
+      printf '202\\n'
+    else
+      printf '300\\n'
+    fi;;
   *getwindowname*300*) printf 'UU Remote - TigerVNC\\n';;
+  *getwindowname*202*)
+    if [[ "$FOCUS_TEST_MODE" == tiger-vnc ]]; then
+      printf 'test:99 - TigerVNC\\n'
+    else
+      printf '127.0.0.1:99 - RealVNC Viewer\\n'
+    fi;;
   *getwindowname*200*)
     [[ "$FOCUS_TEST_MODE" != uu-device ]] || { printf 'UU Laptop\\n'; exit; }
     printf 'UU Remote\\n';;
@@ -312,6 +324,45 @@ touch "$FOCUS_RESUMED"
         self.assertIn("windowactivate 202", calls)
         self.assertFalse(lease)
 
+    def test_restores_tigervnc_on_private_display(self):
+        result, calls, lease = self.run_helpers("tiger-vnc", "focus_client; release_client")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("windowactivate 202", calls)
+        self.assertIn(":99 windowraise 202", calls)
+        self.assertNotIn("windowactivate 300", calls)
+        self.assertFalse(lease)
+
+    def test_vnc_supervisor_restores_stacking_even_when_relay_already_has_focus(self):
+        bridge = (REPOSITORY / 'scripts/uu-remote-bridge').read_text()
+        body = bridge.split('            active_window_id="$(', 1)[1].split('        health_checks=', 1)[0]
+        body = 'active_window_id="$(' + body
+        # This closes the supervisor's periodic block; the test calls just
+        # its focus/stacking body, never starts Wine or the real bridge.
+        body = body.rsplit('\n        fi', 1)[0]
+        cases = [("vnc", "legacy", False, False, True),
+                 ("vnc", "legacy", True, False, False),
+                 ("vnc", "legacy", False, True, False),
+                 ("vnc", "rdp-public", False, False, False),
+                 ("rdp", "legacy", False, False, False)]
+        for relay, route, manager, leased, raises in cases:
+            with self.subTest(relay=relay,route=route,manager=manager,leased=leased), \
+                    tempfile.TemporaryDirectory(prefix='uu-relay-stack-') as temporary:
+                directory = Path(temporary)
+                xdo = directory/'xdotool'
+                xdo.write_text('#!/bin/bash\nif [[ "$1" == getactivewindow ]]; then echo 202; else echo "$*" >> "$CALLS"; fi\n')
+                xdo.chmod(0o700)
+                if manager: (directory/'session').touch()
+                if leased: (directory/'focus').touch()
+                env = dict(os.environ, desktop_relay=relay,input_route=route,relay_window_id='202',
+                           console_focus_file=str(directory/'focus'),
+                           console_window_session_file=str(directory/'session'),CALLS=str(directory/'calls'))
+                result = subprocess.run(['bash','-c',body.replace('/usr/bin/xdotool',str(xdo))],
+                                        env=env,capture_output=True,text=True,timeout=5)
+                self.assertEqual(result.returncode,0,result.stderr)
+                calls = (directory/'calls').read_text() if (directory/'calls').exists() else ''
+                self.assertEqual('windowraise 202' in calls,raises)
+                self.assertNotIn('windowactivate',calls)
+
     def test_reopens_unmapped_main_window_without_mapping_small_toast(self):
         result, calls, lease = self.run_helpers("hidden", "focus_client")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -384,6 +435,7 @@ activate_existing_window
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(lease)
         self.assertEqual(calls.splitlines(), [
+            ":99 windowraise 101",
             ":99 windowactivate 101",
             ":77 windowactivate --sync 300",
         ])

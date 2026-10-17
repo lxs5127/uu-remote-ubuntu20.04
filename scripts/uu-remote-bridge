@@ -26,6 +26,11 @@ uu_audio_setting="${UURB_UU_AUDIO:-system}"
 libei_mode="${UURB_LIBEI_MODE:-auto}"
 terminal_session_mode="${UURB_TERMINAL_SESSION_MODE:-fresh}"
 wine_prefix="${UURB_WINEPREFIX:-$HOME/.local/share/wineprefixes/uu-remote}"
+wine_bin="${UURB_WINE_BIN:-/opt/wine-stable/bin/wine}"
+wine_tools_dir="$(dirname -- "$wine_bin")"
+wineserver_bin="$wine_tools_dir/wineserver"
+winepath_bin="$wine_tools_dir/winepath"
+export WINELOADER="$wine_bin"
 service_name="${UURB_SERVICE_NAME:-uu-remote-bridge.service}"
 environment_file="$HOME/.config/uu-remote-bridge/environment"
 manager_display="${DISPLAY:-}"
@@ -154,7 +159,7 @@ export UURB_CURSOR_GUARD_LOG="C:\\users\\$bridge_user\\Temp\\uu-cursor-guard.log
 export UURB_TEXT_KEY_DELAY_MS="$text_key_delay_ms"
 export UURB_PHYSICAL_KEY_DELAY_MS="$physical_key_delay_ms"
 export UURB_PHONE_TEXT_MODE="$phone_text_mode"
-export PATH="/opt/wine-stable/bin:/usr/bin:/bin"
+export PATH="$wine_tools_dir:/usr/bin:/bin"
 
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/uu-remote-bridge"
 runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$UID}/uu-remote-bridge"
@@ -200,6 +205,7 @@ x11_clipboard_ready_file="$runtime_dir/x11-clipboard.port"
 terminal_ready_file="$runtime_dir/terminal.port"
 private_display_file="$runtime_dir/private-display"
 console_focus_file="$runtime_dir/console-focus"
+console_window_session_file="${XDG_RUNTIME_DIR:-/run/user/$UID}/uu-remote-console/window-session"
 wine_stop_bin="$HOME/.local/libexec/uu-remote-stop-wine-prefix"
 
 # Ubuntu >= 26.04 ships libei >= 1.3 with the upstream keymap-FD fix
@@ -220,6 +226,7 @@ grd_pid=""
 freerdp_pid=""
 desktop_x11vnc_pid=""
 vncviewer_pid=""
+vncviewer_tiger=false
 winlogon_pid=""
 input_broker_pid=""
 x11_input_pid=""
@@ -270,7 +277,8 @@ desktop_geometry() {
         /usr/bin/env \
             DISPLAY="$desktop_display" \
             XAUTHORITY="$selected_xauthority" \
-            /usr/bin/xdotool getdisplaygeometry 2>/dev/null
+            /usr/bin/xdpyinfo 2>/dev/null | /usr/bin/awk \
+                '$1 == "dimensions:" { split($2, size, "x"); print size[1], size[2]; exit }'
     ) || return 1
     [[ "$width" =~ ^[0-9]+$ && "$height" =~ ^[0-9]+$ ]] || return 1
     # Ignore transient tiny RDP windows. They are useful client-side sizes,
@@ -496,7 +504,7 @@ ACK
             kill -0 "$manual_plane_pid" >/dev/null 2>&1 || break
             sleep .05
         done
-        if /usr/bin/bash "$wine_stop_bin" "$WINEPREFIX" /opt/wine-stable/bin/wineserver &&
+        if /usr/bin/bash "$wine_stop_bin" "$WINEPREFIX" "$wineserver_bin" &&
            /usr/bin/python3 "$full_ready_helper" --mark-stopped \
                --prefix "$WINEPREFIX" --parent "$$" --nonce "$full_nonce" \
                --output "$full_session_dir/prefix-stopped.json"; then
@@ -597,7 +605,7 @@ ACK
 
     if [[ -z "$manual_plane_pid" ]]; then
         /usr/bin/bash "$wine_stop_bin" \
-            "$WINEPREFIX" /opt/wine-stable/bin/wineserver || true
+            "$WINEPREFIX" "$wineserver_bin" || true
     fi
 
     display_lock="/tmp/.X${display_number}-lock"
@@ -1031,6 +1039,23 @@ restore_desktop_monitor_mode() {
 
 start_desktop_relay() {
     local -a desktop_environment
+    local -a vnc_scale_options=()
+    local -a vnc_cursor_options=(-cursor most -nocursorshape -nocursorpos)
+    # The native X11 input broker appears as local mouse input to x11vnc.
+    # Its default wireframe heuristic waits for a possible window drag on
+    # edge clicks, suspending video updates even when a page is just closing.
+    # GNOME window transitions and scaled CopyRect updates can leave torn,
+    # repeated regions in the private viewer. Send the changed pixels instead
+    # of guessing window-move or scroll copies on this loopback-only relay.
+    # Capture one source snapshot before scanning its tiles. On the physical
+    # NVIDIA/GNOME desktop, live tile reads mix different compositor frames
+    # during large redraws; DAMAGE hints alone do not prevent this tearing.
+    # Keep snapshot polling short: the real-desktop 60 Hz probe measured
+    # lower capture age and steadier updates at 1 ms than at 5 ms.
+    local -a vnc_refresh_options=(-wait 1 -defer 0 -setdefer 0 -nonap -sb 0
+                                 -nowireframe -nowirecopyrect -noscrollcopyrect
+                                 -noxdamage -snapfb)
+    local vncviewer_help
     local desktop_vnc_log
     local native_openssl_modules
     local selected_xauthority
@@ -1045,6 +1070,7 @@ start_desktop_relay() {
 
     selected_desktop="${desktop_display:-$desktop_wayland}"
     log "Desktop target '$desktop_target' selected ${desktop_session_service:-unknown} session ${desktop_session_id:-unknown} on ${selected_desktop:-unknown}."
+    align_resolution_at_startup || return 1
 
     if [[ "$desktop_relay" == vnc ]]; then
         if [[ "$desktop_session_type" != x11 || -z "$desktop_display" ]]; then
@@ -1067,6 +1093,13 @@ start_desktop_relay() {
             return $?
         fi
 
+        vncviewer_help="$(/usr/bin/vncviewer -help 2>&1 || true)"
+        if [[ "$vncviewer_help" == *TigerVNC* ]]; then
+            vncviewer_tiger=true
+            # TigerVNC 1.10 has no viewer-side scaling. x11vnc scales capture
+            # and maps pointer events back to the unmodified source desktop.
+            vnc_scale_options=(-scale "${resolution}:nocr")
+        fi
         desktop_vnc_log="$state_dir/desktop-x11vnc.log"
         : >"$desktop_vnc_log"
         /usr/bin/env \
@@ -1086,6 +1119,9 @@ start_desktop_relay() {
             -modtweak \
             -xkb \
             -add_keysyms \
+            "${vnc_scale_options[@]}" \
+            "${vnc_cursor_options[@]}" \
+            "${vnc_refresh_options[@]}" \
             -seldir recv \
             -autoport 5922 \
             >>"$desktop_vnc_log" 2>&1 &
@@ -1334,7 +1370,7 @@ start_wine_clipboard_bridge() {
         "UURB_X11_CLIPBOARD_PORT=$x11_clipboard_port" \
         "UURB_X11_CLIPBOARD_TOKEN=$x11_clipboard_token" \
         UURB_CLIPBOARD_EXTENDED=1 \
-        /opt/wine-stable/bin/wine "$wine_clipboard_bridge_exe" \
+        "$wine_bin" "$wine_clipboard_bridge_exe" \
         >>"$state_dir/wine-clipboard-bridge.log" 2>&1 &
     wine_clipboard_bridge_pid=$!
     sleep 0.2
@@ -1425,10 +1461,7 @@ fi
 if ! start_desktop_relay; then
     exit 1
 fi
-if ! align_resolution_at_startup; then
-    exit 1
-fi
-log "Using private display $DISPLAY at $resolution and RDP port $rdp_port."
+log "Using private display $DISPLAY at $resolution with the $desktop_relay relay."
 if [[ "$cursor_guard_setting" == on ]]; then
     resolve_cursor_size
 fi
@@ -1475,7 +1508,26 @@ printf '%s\n' "$DISPLAY" >"$private_display_tmp"
 chmod 0600 "$private_display_tmp"
 mv "$private_display_tmp" "$private_display_file"
 
-/usr/bin/openbox >>"$state_dir/openbox.log" 2>&1 &
+openbox_options=()
+if [[ "$desktop_relay" == vnc && "$vncviewer_tiger" == true ]]; then
+    # A fullscreen TigerVNC window is kept above normal windows by Openbox.
+    # Use an undecorated normal window so the redirected manager can receive
+    # pointer input without it looping back through the physical desktop.
+    cat >"$runtime_dir/openbox-vnc.xml" <<'XML'
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <theme><keepBorder>no</keepBorder></theme>
+  <applications>
+    <application class="TigerVNC Viewer">
+      <decor>no</decor>
+      <maximized>yes</maximized>
+      <position force="yes"><x>0</x><y>0</y></position>
+    </application>
+  </applications>
+</openbox_config>
+XML
+    openbox_options=(--config-file "$runtime_dir/openbox-vnc.xml")
+fi
+/usr/bin/openbox "${openbox_options[@]}" >>"$state_dir/openbox.log" 2>&1 &
 openbox_pid=$!
 if [[ "$native_display_modes" == true ]]; then
     if ! /usr/bin/python3 "$wine_prefix/compat/uu-display-modes.py" register "$resolution" \
@@ -1527,6 +1579,12 @@ if [[ "$input_route" == rdp-public ]]; then
     [[ "$plane_started" == true ]] || { log 'Manual root owner did not start.'; exit 1; }
 fi
 start_x11_input_helper
+if [[ "$desktop_relay" == vnc && "$input_route" == legacy &&
+      "$active_keyboard_route" == x11 ]]; then
+    # Native VNC windows are invisible to Wine's foreground-window routing.
+    # Send remote INPUTs through the authenticated native helper instead.
+    input_bridge_dll="$compat_dir/uu-input-bridge-x11.dll"
+fi
 start_x11_clipboard_helper
 
 if [[ "$desktop_relay" == rdp && ! -f "$freerdp_exe" ]]; then
@@ -1595,10 +1653,10 @@ fi
 
 /usr/bin/timeout --kill-after=1s 5s \
     /usr/bin/env WINEPREFIX="$WINEPREFIX" \
-    /opt/wine-stable/bin/wineserver -k >/dev/null 2>&1 || true
+    "$wineserver_bin" -k >/dev/null 2>&1 || true
 /usr/bin/timeout --kill-after=1s 5s \
     /usr/bin/env WINEPREFIX="$WINEPREFIX" \
-    /opt/wine-stable/bin/wineserver -w >/dev/null 2>&1 || true
+    "$wineserver_bin" -w >/dev/null 2>&1 || true
 
 "${wine_host_environment[@]}" "$compat_dir/winlogon.exe" \
     >>"$state_dir/winlogon.log" 2>&1 &
@@ -1620,9 +1678,9 @@ if [[ "$uu_ready" != true ]]; then
 fi
 
 if [[ "$input_route" == rdp-public ]]; then
-    [[ "$(/opt/wine-stable/bin/winepath -w "$uu_app_dir/bin/GameViewerServer.exe")" == "$UURB_INPUT_SOURCE_EXE" &&
-       "$(/opt/wine-stable/bin/winepath -w "$full_ready_dir/broker.ready")" == "$UURB_FULL_BROKER_READY" &&
-       "$(/opt/wine-stable/bin/winepath -w "$full_ready_dir/sdl.ready")" == "$UURB_FULL_SDL_READY" ]] || {
+    [[ "$("$winepath_bin" -w "$uu_app_dir/bin/GameViewerServer.exe")" == "$UURB_INPUT_SOURCE_EXE" &&
+       "$("$winepath_bin" -w "$full_ready_dir/broker.ready")" == "$UURB_FULL_BROKER_READY" &&
+       "$("$winepath_bin" -w "$full_ready_dir/sdl.ready")" == "$UURB_FULL_SDL_READY" ]] || {
         log 'Actual Wine C: executable/readiness mapping differs from startup binding.'
         exit 1
     }
@@ -1637,7 +1695,7 @@ if [[ -n "$x11_input_port" ]]; then
         broker_environment+=("UURB_X11_INPUT_SEMANTIC_ONLY=1")
     fi
 fi
-"${broker_environment[@]}" /opt/wine-stable/bin/wine "$input_broker_exe" \
+"${broker_environment[@]}" "$wine_bin" "$input_broker_exe" \
     >>"$state_dir/input-broker.log" 2>&1 &
 input_broker_pid=$!
 
@@ -1648,7 +1706,7 @@ if ! kill -0 "$input_broker_pid" >/dev/null 2>&1; then
 fi
 
 if [[ "$input_route" == rdp-public ]]; then
-    broker_windows_exe="$(/opt/wine-stable/bin/winepath -w "$input_broker_exe")"
+    broker_windows_exe="$("$winepath_bin" -w "$input_broker_exe")"
     broker_ready_identity="$(/usr/bin/python3 "$full_ready_helper" \
         --ready "$full_ready_dir/broker.ready" --nonce "$full_nonce" --role broker \
         --exe "$input_broker_exe" --exe-windows "$broker_windows_exe" \
@@ -1666,7 +1724,7 @@ if [[ "$input_route" == rdp-public ]]; then
 fi
 
 input_bridge_windows_path="$(
-    /opt/wine-stable/bin/winepath -w "$input_bridge_dll"
+    "$winepath_bin" -w "$input_bridge_dll"
 )"
 preserve_cursor_guard_failure() {
     local phase="$1"
@@ -1708,7 +1766,7 @@ preserve_cursor_guard_failure() {
 }
 
 inject_input_bridge() {
-    if ! /opt/wine-stable/bin/wine "$input_injector_exe" \
+    if ! "$wine_bin" "$input_injector_exe" \
         "$input_bridge_windows_path" \
         >>"$state_dir/input-injector.log" 2>&1; then
         log 'Could not inject the UU input compatibility bridge.'
@@ -1724,7 +1782,7 @@ initialize_server_compatibility() {
     fi
     [[ "$cursor_guard_setting" == on ]] || return 0
     rm -f "$cursor_reader_guard_log"
-    if ! /opt/wine-stable/bin/wine "$input_injector_exe" \
+    if ! "$wine_bin" "$input_injector_exe" \
         "$cursor_guard_windows_path" GameViewerServer.exe \
         >>"$state_dir/cursor-reader-guard-injector.log" 2>&1; then
         log 'Could not inject the UU cursor reader guard.'
@@ -1753,7 +1811,7 @@ initialize_server_compatibility() {
 
 if [[ "$cursor_guard_setting" == on ]]; then
     cursor_guard_windows_path="$(
-        /opt/wine-stable/bin/winepath -w "$cursor_guard_dll"
+        "$winepath_bin" -w "$cursor_guard_dll"
     )"
 fi
 if ! initialize_server_compatibility; then
@@ -1775,7 +1833,7 @@ if [[ "$desktop_relay" == rdp ]]; then
     if [[ "$cursor_guard_setting" == on ]]; then
         freerdp_mouse_options+=(/mouse:relative:off,grab:off)
     fi
-    /opt/wine-stable/bin/wine "$freerdp_exe" \
+    "$wine_bin" "$freerdp_exe" \
         "/v:127.0.0.1:$rdp_port" \
         "/u:$bridge_user" \
         /from-stdin:force \
@@ -1821,7 +1879,7 @@ if [[ "$desktop_relay" == rdp ]]; then
 
     if [[ "$cursor_guard_setting" == on ]]; then
         rm -f "$cursor_guard_log"
-        if ! /opt/wine-stable/bin/wine "$input_injector_exe" \
+        if ! "$wine_bin" "$input_injector_exe" \
             "$cursor_guard_windows_path" sdl-freerdp.exe \
             >>"$state_dir/cursor-guard-injector.log" 2>&1; then
             log 'Could not inject the FreeRDP cursor guard.'
@@ -1855,6 +1913,24 @@ if [[ "$desktop_relay" == rdp ]]; then
     )"
 else
     desktop_vnc_display=$((desktop_vnc_port - 5900))
+    if [[ "$vncviewer_tiger" == true ]]; then
+        vnc_relay_guard="$compat_dir/uu-vnc-relay-guard.so"
+        if [[ ! -r "$vnc_relay_guard" ]]; then
+            log 'The private TigerVNC pointer guard is missing; reinstall the bridge.'
+            exit 1
+        fi
+        /usr/bin/env DBUS_SESSION_BUS_ADDRESS=unix:path=/dev/null \
+            LD_PRELOAD="$vnc_relay_guard${LD_PRELOAD:+:$LD_PRELOAD}" \
+            /usr/bin/vncviewer \
+            -FullScreen=0 -geometry "${resolution}+0+0" \
+            -FullscreenSystemKeys=0 \
+            -Shared=1 -RemoteResize=0 -MenuKey= \
+            -SendClipboard=1 -AcceptClipboard=0 -SendPrimary=0 -SetPrimary=0 \
+            -AutoSelect=0 -FullColor=1 -PreferredEncoding=Raw \
+            -AlertOnFatalError=0 -SecurityTypes=None \
+            "127.0.0.1:$desktop_vnc_display" \
+            >>"$state_dir/vncviewer-relay.log" 2>&1 &
+    else
     /usr/bin/env \
         DBUS_SESSION_BUS_ADDRESS=unix:path=/dev/null \
         /usr/bin/vncviewer \
@@ -1887,6 +1963,7 @@ else
         -ChangeServerDefaultPrinter=0 \
         "127.0.0.1:$desktop_vnc_display" \
         >>"$state_dir/vncviewer-relay.log" 2>&1 &
+    fi
     vncviewer_pid=$!
 
     for _ in {1..300}; do
@@ -1894,7 +1971,7 @@ else
             {
                 /usr/bin/xdotool search --onlyvisible \
                     --pid "$vncviewer_pid" \
-                    --name '^127\.0\.0\.1:.* - RealVNC Viewer$' \
+                    --name ' - (RealVNC Viewer|TigerVNC)$' \
                     2>/dev/null || true
             } | /usr/bin/tail -n 1
         )"
@@ -1911,6 +1988,12 @@ else
         log 'The VNC viewer did not create the Ubuntu desktop relay window.'
         exit 1
     fi
+    if [[ "$vncviewer_tiger" == true ]]; then
+        # TigerVNC initially limits normal windows to the screen work area.
+        # The private relay must fill the capture canvas without decorations.
+        /usr/bin/xdotool windowmove "$relay_window_id" 0 0 \
+            windowsize "$relay_window_id" "$resolution_width" "$resolution_height"
+    fi
 fi
 
 if [[ -z "$relay_window_id" ]]; then
@@ -1918,7 +2001,7 @@ if [[ -z "$relay_window_id" ]]; then
     exit 1
 fi
 if [[ "$input_route" == rdp-public ]]; then
-    sdl_windows_exe="$(/opt/wine-stable/bin/winepath -w "$freerdp_exe")"
+    sdl_windows_exe="$("$winepath_bin" -w "$freerdp_exe")"
     sdl_ready_identity="$(/usr/bin/python3 "$full_ready_helper" \
         --ready "$full_ready_dir/sdl.ready" --nonce "$full_nonce" --role sdl \
         --exe "$freerdp_exe" --exe-windows "$sdl_windows_exe" \
@@ -1939,7 +2022,7 @@ if [[ "$input_route" == rdp-public ]]; then
     [[ "$manual_active" == true ]] || { log 'Manual owner did not bind actual SDL viewport.'; exit 1; }
     # One read-only probe before the UU physical DLL takes the single broker
     # pipe. Never probe it periodically while that long-lived client owns it.
-    if ! /usr/bin/timeout --kill-after=1s 5s /opt/wine-stable/bin/wine \
+    if ! /usr/bin/timeout --kill-after=1s 5s "$wine_bin" \
         "$input_broker_probe_exe" >>"$state_dir/full-input-probe.log" 2>&1; then
         log 'Actual public RDP input capabilities/configuration are not ready.'
         exit 1
@@ -1971,10 +2054,10 @@ else
 fi
 
 bootstrap_account() {
-    /opt/wine-stable/bin/wine "$service_control_exe" \
+    "$wine_bin" "$service_control_exe" \
         GameViewerService 133 \
         >>"$state_dir/service-control.log" 2>&1 || true
-    LIBGL_ALWAYS_SOFTWARE=1 /opt/wine-stable/bin/wine start /unix "$uu_app_dir/GameViewer.exe" \
+    LIBGL_ALWAYS_SOFTWARE=1 "$wine_bin" start /unix "$uu_app_dir/GameViewer.exe" \
         >>"$state_dir/client-bootstrap.log" 2>&1 || true
 
     # Keep the layered Wine/Qt management window mapped. Minimizing it while
@@ -2080,7 +2163,7 @@ supervise_server() {
                     {
                         /usr/bin/xdotool search --onlyvisible \
                             --pid "$vncviewer_pid" \
-                            --name '^127\.0\.0\.1:.* - RealVNC Viewer$' \
+                            --name ' - (RealVNC Viewer|TigerVNC)$' \
                             2>/dev/null || true
                     } | /usr/bin/tail -n 1
                 )"
@@ -2091,11 +2174,21 @@ supervise_server() {
             active_window_id="$(
                 /usr/bin/xdotool getactivewindow 2>/dev/null || true
             )"
-            if [[ "$input_route" != rdp-public && ! -e "$console_focus_file" && \
-                  -n "$active_window_id" && \
-                  "$active_window_id" != "$relay_window_id" ]]; then
-                /usr/bin/xdotool windowactivate "$relay_window_id" \
-                    >/dev/null 2>&1 || true
+            if [[ "$input_route" != rdp-public && ! -e "$console_focus_file" ]]; then
+                # After management closes, a still-mapped Wine window can
+                # cover the VNC relay without taking focus. Restore stacking
+                # independently, including when UU opens a connection notice.
+                # While the isolated manager is open it owns its input stack;
+                # do not race its raise/acknowledge/inject sequence.
+                if [[ "$desktop_relay" == vnc && ! -e "$console_window_session_file" ]]; then
+                    /usr/bin/xdotool windowraise "$relay_window_id" \
+                        >/dev/null 2>&1 || true
+                fi
+                if [[ -n "$active_window_id" && \
+                      "$active_window_id" != "$relay_window_id" ]]; then
+                    /usr/bin/xdotool windowactivate "$relay_window_id" \
+                        >/dev/null 2>&1 || true
+                fi
             fi
         fi
         health_checks=$((health_checks + 1))
@@ -2239,7 +2332,13 @@ for optional_pid in \
     fi
 done
 exited_pid=""
-wait -n -p exited_pid "${critical_pids[@]}"
+if ((BASH_VERSINFO[0] > 5 ||
+     (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1))); then
+    wait -n -p exited_pid "${critical_pids[@]}"
+else
+    # Bash 5.0 (Ubuntu 20.04) supports wait -n but not PID reporting via -p.
+    wait -n "${critical_pids[@]}"
+fi
 child_status=$?
 set -e
 log "A bridge process exited (pid=${exited_pid:-unknown}, status=$child_status); systemd will restart the complete relay."

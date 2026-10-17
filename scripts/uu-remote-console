@@ -44,6 +44,8 @@ saved_setting() {
 }
 
 saved_vnc_port="$(saved_setting UURB_CONSOLE_VNC_PORT)"
+saved_wine_bin="$(saved_setting UURB_WINE_BIN)"
+wine_bin="${UURB_WINE_BIN:-${saved_wine_bin:-/opt/wine-stable/bin/wine}}"
 saved_web_port="$(saved_setting UURB_CONSOLE_WEB_PORT)"
 saved_window_scale="$(saved_setting UURB_WINDOW_SCALE)"
 window_scale="${UURB_WINDOW_SCALE:-${saved_window_scale:-1}}"
@@ -224,6 +226,7 @@ find_client_window() {
 
 find_relay_window() {
     local relay=""
+    local candidate name class
     discover_bridge || return 1
     relay="$(
         /usr/bin/env DISPLAY="$bridge_display" XAUTHORITY="$bridge_xauthority" \
@@ -231,15 +234,22 @@ find_relay_window() {
                 --name '^Ubuntu-Desktop-Relay$' 2>/dev/null | \
             /usr/bin/tail -n 1 || true
     )"
-    if [[ -z "$relay" ]]; then
-        relay="$(
-            /usr/bin/env DISPLAY="$bridge_display" XAUTHORITY="$bridge_xauthority" \
-                /usr/bin/xdotool search --onlyvisible --all \
-                    --class 'realvnc-vncviewer' \
-                    --name '^127\.0\.0\.1:.* - RealVNC Viewer$' 2>/dev/null | \
-                /usr/bin/tail -n 1 || true
-        )"
-    fi
+    # xdotool search takes one trailing pattern; --class/--name select
+    # properties, not independent pattern arguments. Filter names separately
+    # rather than treating --name as a second command after the class pattern.
+    for class in 'realvnc-vncviewer' '^TigerVNC Viewer$'; do
+        [[ -z "$relay" ]] || break
+        while read -r candidate; do
+            name="$(/usr/bin/env DISPLAY="$bridge_display" XAUTHORITY="$bridge_xauthority" \
+                /usr/bin/xdotool getwindowname "$candidate" 2>/dev/null || true)"
+            if [[ "$class" == realvnc-vncviewer &&
+                  "$name" =~ ^127\.0\.0\.1:.*\ -\ RealVNC\ Viewer$ ]] ||
+               [[ "$class" == '^TigerVNC Viewer$' && "$name" == *' - TigerVNC' ]]; then
+                relay="$candidate"
+            fi
+        done < <(/usr/bin/env DISPLAY="$bridge_display" XAUTHORITY="$bridge_xauthority" \
+            /usr/bin/xdotool search --onlyvisible --class "$class" 2>/dev/null || true)
+    done
     [[ -n "$relay" ]] || return 1
     printf '%s\n' "$relay"
 }
@@ -270,7 +280,7 @@ resume_private_client() {
         DISPLAY="$bridge_display" XAUTHORITY="$bridge_xauthority" \
         WINEPREFIX="$prefix" WINEDEBUG=-all LIBGL_ALWAYS_SOFTWARE=1 \
         /usr/bin/timeout --kill-after=2s 10s \
-        /opt/wine-stable/bin/wine start /unix "$executable" \
+        "$wine_bin" start /unix "$executable" \
         </dev/null >>"$state_dir/client-resume.log" 2>&1 9>&-
 }
 
@@ -304,10 +314,15 @@ release_client() {
     discover_bridge || return 0
     # The UU client must stay mapped: minimizing it while its layered
     # top-level windows are being replaced raises BadWindow, terminates the
-    # GUI IPC client, and makes the server destroy its room. Activating the
-    # relay window instead pushes the client safely behind the desktop.
+    # GUI IPC client, and makes the server destroy its room. Restore both
+    # stacking and focus: isolated hover preserves relay focus while raising
+    # the manager, so activating an already focused relay need not raise it.
     relay_window="$(find_relay_window || true)"
     if [[ -n "$relay_window" ]]; then
+        /usr/bin/env DISPLAY="$bridge_display" \
+            XAUTHORITY="$bridge_xauthority" \
+            /usr/bin/xdotool windowraise "$relay_window" \
+                >/dev/null 2>&1 || true
         /usr/bin/env DISPLAY="$bridge_display" \
             XAUTHORITY="$bridge_xauthority" \
             /usr/bin/xdotool windowactivate "$relay_window" \
@@ -619,6 +634,73 @@ manager_capture_ready() {
        "$ready_display" == "$bridge_display" ]]
 }
 
+dismiss_manager_tooltips() {
+    [[ "$window_role" == manager && "${client_window:-}" =~ ^[0-9]+$ &&
+       -n "$bridge_display" && -r "$bridge_xauthority" ]] || return 0
+    # Wine/Qt leaves its unowned, override-redirect "GameViewer" tooltip on
+    # the private root when the separate manager viewer closes. Raising the
+    # relay cannot cover it. Unmap only small, non-input tooltips of the
+    # verified lobby process; keep its lobby and all session windows alive.
+    /usr/bin/env DISPLAY="$bridge_display" XAUTHORITY="$bridge_xauthority" \
+        /usr/bin/python3 - "$client_window" <<'PY'
+import sys
+from Xlib import X, display, error
+
+connection = None
+try:
+    connection = display.Display()
+    main = connection.create_resource_object('window', int(sys.argv[1]))
+    def title(window):
+        value = window.get_full_property(connection.intern_atom('_NET_WM_NAME'),
+                                         connection.intern_atom('UTF8_STRING'))
+        if value is not None:
+            return bytes(value.value).decode('utf-8')
+        value = window.get_wm_name()
+        return value.decode('utf-8') if isinstance(value, bytes) else value
+    if title(main) not in ('网易UU远程', 'UU Remote') or not any(
+            name.lower() == 'gameviewer.exe' for name in (main.get_wm_class() or ())):
+        raise ValueError('Not a manager lobby')
+    pid_atom = connection.intern_atom('_NET_WM_PID')
+    cardinal = connection.intern_atom('CARDINAL')
+    type_atom = connection.intern_atom('_NET_WM_WINDOW_TYPE')
+    normal = connection.intern_atom('_NET_WM_WINDOW_TYPE_NORMAL')
+    def owner(window):
+        value = window.get_full_property(pid_atom, cardinal)
+        return int(value.value[0]) if value is not None and len(value.value) == 1 else None
+    pid = owner(main)
+    if pid is None:
+        raise ValueError('Missing manager owner')
+    children = connection.screen().root.query_tree().children
+    if len(children) > 1024:
+        raise ValueError('Unexpected window count')
+    for window in children:
+        try:
+            if window.id == main.id or owner(window) != pid:
+                continue
+            if title(window) != 'GameViewer' or not any(
+                    name.lower() == 'gameviewer.exe' for name in (window.get_wm_class() or ())):
+                continue
+            attributes = window.get_attributes()
+            geometry = window.get_geometry()
+            hints = window.get_wm_hints()
+            kind = window.get_full_property(type_atom, connection.intern_atom('ATOM'))
+            if (attributes.map_state == X.IsViewable and attributes.override_redirect and
+                    attributes.save_under and geometry.depth == 32 and
+                    1 < geometry.width <= 320 and 1 < geometry.height <= 80 and
+                    hints is not None and hints.flags & 1 and not hints.input and
+                    kind is not None and list(kind.value) == [normal]):
+                window.unmap()
+        except error.XError:
+            continue
+    connection.sync()
+except (error.XError, error.DisplayError, OSError, ValueError):
+    pass
+finally:
+    if connection is not None:
+        connection.close()
+PY
+}
+
 cleanup_window() {
     local -a session=()
     trap - EXIT INT TERM HUP
@@ -661,6 +743,7 @@ cleanup_window() {
         fi
         restore_private_focus || true
     else
+        dismiss_manager_tooltips || true
         release_client || true
     fi
     rm -f "$runtime_dir/window.port"
@@ -1198,6 +1281,12 @@ open_window() {
     # Tight, which produced malformed rectangles with the scaled capture.
     set +e
     local -a viewer_environment=()
+    local -a viewer_extra_options=()
+    local viewer_help
+    viewer_help="$(/usr/bin/vncviewer -help 2>&1 || true)"
+    if [[ "$viewer_help" == *ReconnectOnError* ]]; then
+        viewer_extra_options+=(-ReconnectOnError=0)
+    fi
     local viewer_fonts="$HOME/.local/share/uu-remote/tools/uu-tools-fonts.conf"
     [[ ! -r "$viewer_fonts" ]] || viewer_environment=("FONTCONFIG_FILE=$viewer_fonts")
     /usr/bin/env "${viewer_environment[@]}" \
@@ -1210,7 +1299,7 @@ open_window() {
         -SetPrimary=0 \
         -SendPrimary=0 \
         -RemoteResize=0 \
-        -ReconnectOnError=0 \
+        "${viewer_extra_options[@]}" \
         -AlertOnFatalError=0 \
         -SecurityTypes=None \
         "127.0.0.1::$window_port" \

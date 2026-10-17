@@ -11,6 +11,7 @@ runtime_files=(
     uninstall.sh
     patches/libei-1.2.1-close-keymap-fd.patch
     scripts/build-compat.sh
+    scripts/install-ubuntu20-x11.sh
     scripts/verify-freerdp-input-sdk.py
     scripts/uu-full-ready.py
     scripts/uu-manual-plane.py
@@ -52,6 +53,7 @@ runtime_files=(
     scripts/uu-remote-bridge
     scripts/uu-shared-physical-vnc
     scripts/uu-remote-console
+    scripts/uu-remote-tray.py
     scripts/upgrade-uu-remote.sh
     scripts/verify.sh
     scripts/manage-terminal-runtime.py
@@ -77,6 +79,7 @@ runtime_files=(
     src/uu_clipboard_image_object.h
     src/uu_network_filter.c
     src/uu_manager_capture.c
+    src/uu_vnc_relay_guard.c
     src/uu_service_control.c
     src/uu_terminal_bridge.c
     src/uu_terminal_proxy.c
@@ -100,7 +103,9 @@ runtime_files=(
     systemd/uu-remote-bridge.service
     systemd/uu-shared-physical-vnc.service
     systemd/uu-remote-console.service
+    systemd/uu-remote-tray.service
     desktop/uu-remote.desktop.in
+    desktop/uu-remote-tray.desktop
     desktop/uu-quality.desktop.in
     desktop/uu-tools-fonts.conf
     desktop/uu-vnc-viewer.desktop.in

@@ -15,8 +15,6 @@ saved_wine_prefix="$(
     fi
 )"
 wine_prefix="${UURB_WINEPREFIX:-${WINEPREFIX:-${saved_wine_prefix:-$HOME/.local/share/wineprefixes/uu-remote}}}"
-wine_bin='/opt/wine-stable/bin/wine'
-wineserver_bin='/opt/wine-stable/bin/wineserver'
 grdctl_bin='/usr/bin/grdctl'
 openssl_bin='/usr/bin/openssl'
 python_bin='/usr/bin/python3'
@@ -51,6 +49,12 @@ saved_setting() {
     /usr/bin/sed -n "s/^${name}=//p" "$environment_file" | \
         /usr/bin/tail -n 1
 }
+saved_wine_bin="$(saved_setting UURB_WINE_BIN)"
+wine_bin="${UURB_WINE_BIN:-${saved_wine_bin:-/opt/wine-stable/bin/wine}}"
+wine_tools_dir="$(dirname -- "$wine_bin")"
+wineserver_bin="$wine_tools_dir/wineserver"
+export WINELOADER="$wine_bin"
+export PATH="$wine_tools_dir:$PATH"
 saved_rdp_port="$(saved_setting UURB_RDP_PORT)"
 saved_resolution="$(saved_setting UURB_RESOLUTION)"
 saved_follow_desktop_resolution="$(
@@ -116,6 +120,7 @@ unattended=false
 automatic_updates=false
 upgrade_existing=false
 prefix_only=false
+packages_only=false
 
 usage() {
     cat <<'EOF'
@@ -165,6 +170,7 @@ usage: ./install.sh [options]
   --console-vnc-port N   localhost VNC sidecar port (default: 5920)
   --console-web-port N   localhost noVNC app port (default: 6080)
   --skip-packages        do not install Ubuntu/Wine package dependencies
+  --packages-only        prepare system dependencies and exit
   --skip-account-login   do not open UU for first-time account sign-in
   --unattended           enable TPM-backed startup after an automatic login
   --automatic-updates    enable daily checks and resumable Codex repair
@@ -179,6 +185,10 @@ EOF
 
 while (($#)); do
     case "$1" in
+        --packages-only)
+            packages_only=true
+            shift
+            ;;
         --uu-installer)
             uu_installer="${2:?--uu-installer requires a path}"
             shift 2
@@ -323,6 +333,13 @@ if [[ " $supported_ubuntu_releases " != *" ${VERSION_ID:-} "* ]] &&
         "$supported_ubuntu_releases" "${VERSION_ID:-unknown}" >&2
     printf 'Set UURB_ALLOW_UNVALIDATED_UBUNTU=1 to attempt an unvalidated release.\n' >&2
     exit 1
+fi
+if [[ "${VERSION_ID:-}" == 20.04 ]]; then
+    if [[ "$desktop_relay" != vnc || "$keyboard_route" != x11 ]]; then
+        printf 'Ubuntu 20.04 requires the experimental X11/VNC entry: scripts/install-ubuntu20-x11.sh\n' >&2
+        exit 1
+    fi
+    printf 'Experimental Ubuntu 20.04 X11/VNC installation; GNOME RDP is not used.\n'
 fi
 if [[ ! "$rdp_port" =~ ^[1-9][0-9]{0,4}$ ]] ||
    ((rdp_port < 1024 || rdp_port > 65535)); then
@@ -513,18 +530,24 @@ install_winehq() {
 }
 
 install_packages() {
+    local -a desktop_packages=()
+    if [[ "$desktop_relay" == rdp ]]; then
+        desktop_packages+=(gnome-remote-desktop)
+    fi
     sudo apt-get update
     sudo apt-get install -y \
         acl aria2 binutils ca-certificates cmake crudini curl \
         gcc \
         gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 nasm \
-        fonts-noto-cjk gir1.2-gtk-3.0 git gnome-remote-desktop gnupg iproute2 jq libsecret-tools libx11-6 \
+        fonts-noto-cjk gir1.2-gtk-3.0 git "${desktop_packages[@]}" gnupg iproute2 jq libsecret-tools libx11-6 \
         libxml2-utils libxtst6 meson novnc \
         ninja-build openbox openssl p7zip-full patch python3 python3-attr \
         python3-gi python3-jinja2 python3-xlib python3-pil tar tigervnc-viewer websockify \
         x11-utils x11-xserver-utils x11vnc xauth xclip xcompmgr zenity \
         xdotool xvfb zstd
     install_winehq
+    # winegcc is needed by the native winlogon launcher, even for VNC.
+    sudo apt-get install -y wine-stable-dev
 }
 
 stop_wine_prefix() {
@@ -573,16 +596,23 @@ download_verified() {
 if [[ "$skip_packages" == false ]]; then
     install_packages
 fi
+if [[ "$packages_only" == true ]]; then
+    printf 'System dependencies prepared. Rerun without --packages-only to install UU.\n'
+    exit 0
+fi
 
+desktop_commands=()
+if [[ "$desktop_relay" == rdp ]]; then
+    desktop_commands+=("$grdctl_bin" /usr/libexec/gnome-remote-desktop-daemon)
+fi
 for command in curl meson ninja patch readelf sha256sum /usr/bin/systemctl \
     timeout \
-    "$grdctl_bin" "$openssl_bin" "$python_bin" "$secret_tool_bin" \
+    "${desktop_commands[@]}" "$openssl_bin" "$python_bin" "$secret_tool_bin" \
     "$wine_bin" "$wineserver_bin" /usr/bin/Xvfb /usr/bin/gsettings \
     /usr/bin/awk /usr/bin/ip /usr/bin/mcookie /usr/bin/openbox \
     /usr/bin/script /usr/bin/sort /usr/bin/ss /usr/bin/xauth \
     /usr/bin/vncviewer /usr/bin/websockify /usr/bin/x11vnc /usr/bin/xclip \
-    /usr/bin/xcompmgr /usr/bin/xdotool \
-    /usr/libexec/gnome-remote-desktop-daemon; do
+    /usr/bin/xcompmgr /usr/bin/xdotool; do
     if ! command -v "$command" >/dev/null 2>&1; then
         printf 'missing required command: %s\n' "$command" >&2
         exit 1
@@ -605,7 +635,7 @@ healthd_sha256="$(manifest_field health_monitor.original_sha256)"
 devcon_exe="$uu_bin/drivers/devcon.exe"
 devcon_backup="$devcon_exe.uu-original"
 case "$release_version" in
-    4.33.0.8907|4.34.0.8979|4.39.1.1375|4.39.2.1561|4.42.0.2770)
+    4.33.0.8907|4.34.0.8979|4.39.1.1375|4.39.2.1561|4.42.0.2770|4.43.1.3614)
         devcon_sha256='46731d6ea59dd9b63ad641c79646bb5ff64e1b877a1226536e3fe34d1ab4ee10'
         ;;
     *)
@@ -703,6 +733,10 @@ else
     detected_libei_mode=backport
 fi
 libei_mode="${UURB_LIBEI_MODE:-${saved_libei_mode:-$detected_libei_mode}}"
+if [[ "$desktop_relay" == vnc ]]; then
+    # This setting means no isolated backport is deployed. VNC does not use libei.
+    libei_mode=system
+fi
 if [[ "$libei_mode" == auto ]]; then
     libei_mode="$detected_libei_mode"
 fi
@@ -713,13 +747,16 @@ fi
 printf 'libei mode: %s (system libei %s)\n' \
     "$libei_mode" "${system_libei_version:-absent}"
 
-"$repo_dir/scripts/build-compat.sh" "$compat_build"
+WINEGCC="${WINEGCC:-$wine_tools_dir/winegcc}" \
+    "$repo_dir/scripts/build-compat.sh" "$compat_build"
+if [[ "$desktop_relay" == rdp ]]; then
 "$repo_dir/scripts/build-winpr.sh" "$freerdp_build"
 if [[ "$libei_mode" == backport ]]; then
     "$repo_dir/scripts/build-libei.sh" "$libei_build"
 fi
 
 "$python_bin" "$repo_dir/scripts/verify-freerdp-runtime.py" "$freerdp_build"
+fi
 
 bridge_was_active=false
 if [[ "$prefix_only" == false ]] &&
@@ -736,7 +773,7 @@ restore_bridge_after_failure() {
 }
 trap restore_bridge_after_failure EXIT
 
-if [[ "$prefix_only" == false ]]; then
+if [[ "$prefix_only" == false && "$desktop_relay" == rdp ]]; then
     port_listener="$(/usr/bin/ss -H -ltnp "sport = :$rdp_port" 2>/dev/null || true)"
     if [[ -n "$port_listener" ]] &&
        ! /usr/bin/grep -q 'gnome-remote-de' <<<"$port_listener"; then
@@ -744,6 +781,8 @@ if [[ "$prefix_only" == false ]]; then
             "$rdp_port" "$port_listener" >&2
         exit 1
     fi
+fi
+if [[ "$prefix_only" == false ]]; then
     "${systemctl_user[@]}" stop uu-remote-bridge.service >/dev/null 2>&1 || true
 fi
 stop_wine_prefix
@@ -837,6 +876,7 @@ install -m 0644 "$release_manifest" "$installed_manifest"
 install -m 0755 \
     "$compat_build/uu-cursor-guard.dll" \
     "$compat_build/uu-input-bridge.dll" \
+    "$compat_build/uu-input-bridge-x11.dll" \
     "$compat_build/uu-input-broker.exe" \
     "$compat_build/uurb-full-input-client.dll" \
     "$compat_build/uu-input-broker-probe.exe" \
@@ -850,6 +890,8 @@ install -m 0755 "$compat_build/uu-network-filter.so" \
     "$wine_prefix/compat/uu-network-filter.so"
 install -m 0755 "$compat_build/uu-manager-capture.so" \
     "$wine_prefix/compat/uu-manager-capture.so"
+install -m 0755 "$compat_build/uu-vnc-relay-guard.so" \
+    "$wine_prefix/compat/uu-vnc-relay-guard.so"
 install -m 0755 "$repo_dir/scripts/uu-controller-fit.py" \
     "$wine_prefix/compat/uu-controller-fit.py"
 install -m 0755 "$repo_dir/scripts/uu-display-modes.py" \
@@ -866,6 +908,7 @@ install -m 0755 "$compat_build/winlogon.exe" \
     "$wine_prefix/compat/winlogon.exe"
 install -m 0755 "$compat_build/winlogon.exe.so" \
     "$wine_prefix/compat/winlogon.exe.so"
+if [[ "$desktop_relay" == rdp ]]; then
 while IFS= read -r freerdp_file; do
     mkdir -p "$freerdp_install/$(dirname -- "$freerdp_file")"
     install -m 0755 "$freerdp_build/$freerdp_file" "$freerdp_install/$freerdp_file"
@@ -883,6 +926,7 @@ for freerdp_receipt in .build-recipe .build-sha256 .source-provenance.json; do
     install -m 0644 "$freerdp_build/$freerdp_receipt" "$freerdp_install/$freerdp_receipt"
 done
 "$python_bin" "$repo_dir/scripts/verify-freerdp-runtime.py" "$freerdp_install"
+fi
 runtime_digest_tmp="$(mktemp "$wine_prefix/compat/.runtime-source-sha256.XXXXXX")"
 "$repo_dir/scripts/runtime-source-digest" >"$runtime_digest_tmp"
 chmod 0644 "$runtime_digest_tmp"
@@ -924,7 +968,8 @@ fi
 
 "$python_bin" "$repo_dir/scripts/patch-gameviewer.py" patch "$server_exe" \
     --manifest "$installed_manifest"
-"$repo_dir/scripts/clean-wine-device-registry" "$wine_prefix"
+WINE_BIN="$wine_bin" WINESERVER_BIN="$wineserver_bin" \
+    "$repo_dir/scripts/clean-wine-device-registry" "$wine_prefix"
 
 if [[ "$prefix_only" == true ]]; then
     printf '\nPrepared approved UU release in %s without changing RDP configuration or opening the login UI.\n' \
@@ -934,11 +979,13 @@ fi
 
 install -d -m 0755 \
     "$HOME/.local/bin" "$HOME/.local/libexec" \
-    "$HOME/.config/systemd/user" "$HOME/.local/share/applications"
+    "$HOME/.config/systemd/user" "$HOME/.local/share/applications" \
+    "$HOME/.local/share/uu-remote/tools"
 install -d -m 0700 "$config_dir"
 environment_tmp="$(mktemp "$config_dir/.environment.XXXXXX")"
 printf 'UURB_RDP_PORT=%s\n' "$rdp_port" >"$environment_tmp"
 printf 'UURB_WINEPREFIX=%s\n' "$wine_prefix" >>"$environment_tmp"
+printf 'UURB_WINE_BIN=%s\n' "$wine_bin" >>"$environment_tmp"
 printf 'UURB_RESOLUTION=%s\n' "$resolution" >>"$environment_tmp"
 printf 'UURB_FOLLOW_DESKTOP_RESOLUTION=%s\n' \
     "$follow_desktop_resolution" >>"$environment_tmp"
@@ -983,6 +1030,15 @@ install -m 0755 "$repo_dir/scripts/uu-shared-physical-vnc" \
 install -m 0755 "$repo_dir/scripts/uu-remote" "$HOME/.local/bin/uu-remote"
 install -m 0755 "$repo_dir/scripts/uu-remote-console" \
     "$HOME/.local/bin/uu-remote-console"
+install -m 0755 "$repo_dir/scripts/uu-remote-tray.py" \
+    "$HOME/.local/libexec/uu-remote-tray.py"
+install -m 0644 "$repo_dir/systemd/uu-remote-tray.service" \
+    "$HOME/.config/systemd/user/uu-remote-tray.service"
+if /usr/bin/python3 -c 'import ctypes.util; import gi; assert ctypes.util.find_library("appindicator3") or ctypes.util.find_library("ayatana-appindicator3")' 2>/dev/null; then
+    install -d -m 0755 "$HOME/.config/autostart"
+    install -m 0644 "$repo_dir/desktop/uu-remote-tray.desktop" \
+        "$HOME/.config/autostart/uu-remote-tray.desktop"
+fi
 install -m 0755 "$repo_dir/scripts/uu-agent" "$HOME/.local/bin/uu-agent"
 install -m 0755 "$repo_dir/scripts/uu-ssh" "$HOME/.local/bin/uu-ssh"
 install -m 0755 "$repo_dir/scripts/uu-shell" "$HOME/.local/bin/uu-shell"
@@ -1118,6 +1174,7 @@ if command -v update-desktop-database >/dev/null 2>&1; then
         >/dev/null 2>&1 || true
 fi
 
+if [[ "$desktop_relay" == rdp ]]; then
 tls_dir="$HOME/.local/share/gnome-remote-desktop"
 tls_cert="$tls_dir/rdp-tls.crt"
 tls_key="$tls_dir/rdp-tls.key"
@@ -1156,6 +1213,11 @@ printf '%s' "$rdp_password" | "$python_bin" \
 printf '%s' "$rdp_password" | "$secret_tool_bin" store \
     --label='UU Remote Ubuntu bridge RDP credential' \
     service uu-desktop-bridge username "$bridge_user"
+else
+    # VNC console authentication is independent of GNOME Keyring/RDP. Keep it
+    # private and generate it without a password prompt or secret in argv.
+    rdp_password="$("$openssl_bin" rand -hex 16)"
+fi
 relay_vnc_auth_file="$config_dir/relay-vnc.pass"
 relay_vnc_auth_temporary="$(mktemp "$config_dir/relay-vnc.pass.XXXXXX")"
 relay_vnc_password="$(LC_ALL=C printf '%.8s' "$rdp_password")"
@@ -1187,6 +1249,9 @@ fi
 if [[ "$start_service" == true ]]; then
     "${systemctl_user[@]}" restart uu-remote-bridge.service
     "$repo_dir/scripts/verify.sh" --quick
+    if [[ -n "${DISPLAY:-}" && -f "$HOME/.config/autostart/uu-remote-tray.desktop" ]]; then
+        "${systemctl_user[@]}" restart uu-remote-tray.service || true
+    fi
 fi
 
 if [[ "$unattended" == true ]]; then

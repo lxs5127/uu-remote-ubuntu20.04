@@ -4,7 +4,12 @@ set -Eeuo pipefail
 umask 077
 
 service_name="${UURB_SERVICE_NAME:-uu-remote-bridge.service}"
-wine_bin="${UURB_WINE_BIN:-/opt/wine-stable/bin/wine}"
+saved_wine_bin=""
+if [[ -f "$HOME/.config/uu-remote-bridge/environment" ]]; then
+    saved_wine_bin="$(/usr/bin/sed -n 's/^UURB_WINE_BIN=//p' \
+        "$HOME/.config/uu-remote-bridge/environment" | /usr/bin/tail -n 1)"
+fi
+wine_bin="${UURB_WINE_BIN:-${saved_wine_bin:-/opt/wine-stable/bin/wine}}"
 runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$UID}/uu-remote-bridge"
 default_prefix="$HOME/.local/share/wineprefixes/uu-remote"
 systemctl_user=(
@@ -64,6 +69,14 @@ discover_runtime() {
     )"
     [[ "$cgroup" == /* ]] || fail "could not discover the bridge cgroup"
     cgroup_file="/sys/fs/cgroup${cgroup}/cgroup.procs"
+    if [[ ! -r "$cgroup_file" ]]; then
+        for cgroup_root in /sys/fs/cgroup/systemd /sys/fs/cgroup/unified; do
+            if [[ -r "$cgroup_root${cgroup}/cgroup.procs" ]]; then
+                cgroup_file="$cgroup_root${cgroup}/cgroup.procs"
+                break
+            fi
+        done
+    fi
     [[ -r "$cgroup_file" ]] || fail "cannot read bridge process membership"
 
     while read -r pid; do

@@ -4,14 +4,16 @@ set -Eeuo pipefail
 
 environment_file="$HOME/.config/uu-remote-bridge/environment"
 saved_wine_prefix=""
+saved_wine_bin=""
 if [[ -f "$environment_file" ]]; then
     saved_wine_prefix="$(/usr/bin/sed -n 's/^UURB_WINEPREFIX=//p' "$environment_file" | /usr/bin/tail -n 1)"
+    saved_wine_bin="$(/usr/bin/sed -n 's/^UURB_WINE_BIN=//p' "$environment_file" | /usr/bin/tail -n 1)"
 fi
 export WINEPREFIX="${UURB_WINEPREFIX:-${WINEPREFIX:-${saved_wine_prefix:-$HOME/.local/share/wineprefixes/uu-remote}}}"
 export WINEDEBUG="${WINEDEBUG:--all}"
 
-wine_bin="${WINE_BIN:-/opt/wine-stable/bin/wine}"
-wineserver_bin="${WINESERVER_BIN:-/opt/wine-stable/bin/wineserver}"
+wine_bin="${WINE_BIN:-${UURB_WINE_BIN:-${saved_wine_bin:-/opt/wine-stable/bin/wine}}}"
+wineserver_bin="${WINESERVER_BIN:-$(dirname -- "$wine_bin")/wineserver}"
 wine_stop_bin="$HOME/.local/libexec/uu-remote-stop-wine-prefix"
 connection_status_bin="$HOME/.local/libexec/uu-connection-status"
 registry_cleaner_bin="$HOME/.local/libexec/uu-clean-wine-device-registry"
@@ -63,7 +65,8 @@ case "${1:-open}" in
             notify_error 'The Wine device-registry repair helper is not installed.'
             exit 1
         fi
-        exec "$registry_cleaner_bin" --manage-service "$WINEPREFIX"
+        exec /usr/bin/env WINE_BIN="$wine_bin" WINESERVER_BIN="$wineserver_bin" \
+            "$registry_cleaner_bin" --manage-service "$WINEPREFIX"
         ;;
     update)
         shift || true

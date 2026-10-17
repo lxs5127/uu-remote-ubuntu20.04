@@ -238,7 +238,7 @@ def main(argv=None):
                     raise ValueError("Installed genuine Windows display mode helper is unavailable.")
                 environment = dict(os.environ, WINEPREFIX=str(args.prefix), WINEDEBUG="-all")
                 environment.pop("LD_PRELOAD", None)
-                changed = subprocess.run(["/opt/wine-stable/bin/wine", str(helper), args.resolution],
+                changed = subprocess.run([os.environ.get("UURB_WINE_BIN", "/opt/wine-stable/bin/wine"), str(helper), args.resolution],
                                          env=environment, capture_output=True, text=True, timeout=12)
                 if changed.returncode:
                     raise RuntimeError(changed.stderr.strip() or "Windows fullscreen mode restore failed.")

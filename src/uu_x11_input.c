@@ -391,7 +391,17 @@ static bool overview_dbus(bool setting, bool value, char *output,
             dup2(null_fd, STDERR_FILENO) < 0 ||
             dup2(pipes[1], STDOUT_FILENO) < 0)
             _exit(127);
+        /* closefrom() is unavailable in Ubuntu 20.04's glibc 2.31. Do not
+         * let the action process inherit the helper's sockets or X11 fd. */
+#if defined(__GLIBC__) && __GLIBC_PREREQ(2, 34)
         closefrom(3);
+#else
+        long descriptor_limit = sysconf(_SC_OPEN_MAX);
+        if (descriptor_limit < 3 || descriptor_limit > INT_MAX)
+            _exit(127);
+        for (int descriptor = 3; descriptor < descriptor_limit; ++descriptor)
+            close(descriptor);
+#endif
         if (setting)
             execl("/usr/bin/gdbus", "gdbus", "call", "--session",
                   "--timeout", "1", "--dest", "org.gnome.Shell",

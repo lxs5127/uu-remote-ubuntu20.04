@@ -72,7 +72,7 @@ release_version="$(manifest_field version)"
 devcon="$uu_bin/drivers/devcon.exe"
 devcon_backup="$devcon.uu-original"
 case "$release_version" in
-    4.33.0.8907|4.34.0.8979|4.39.1.1375|4.39.2.1561|4.42.0.2770)
+    4.33.0.8907|4.34.0.8979|4.39.1.1375|4.39.2.1561|4.42.0.2770|4.43.1.3614)
         devcon_original_sha256='46731d6ea59dd9b63ad641c79646bb5ff64e1b877a1226536e3fe34d1ab4ee10'
         ;;
     *)
@@ -113,6 +113,8 @@ fi
 "${systemctl_user[@]}" disable --now uu-remote-bridge.service \
     >/dev/null 2>&1 || true
 "${systemctl_user[@]}" disable --now uu-remote-console.service \
+    >/dev/null 2>&1 || true
+"${systemctl_user[@]}" stop uu-remote-tray.service \
     >/dev/null 2>&1 || true
 if [[ -x "$repo_dir/scripts/configure-updater.sh" ]]; then
     if [[ "$purge" == true ]]; then
@@ -158,6 +160,9 @@ rm -f \
     "$HOME/.local/bin/uu-remote" \
     "$HOME/.local/bin/uu-remote-bridge" \
     "$HOME/.local/bin/uu-remote-console" \
+    "$HOME/.local/libexec/uu-remote-tray.py" \
+    "$HOME/.config/autostart/uu-remote-tray.desktop" \
+    "$HOME/.config/systemd/user/uu-remote-tray.service" \
     "$HOME/.local/bin/uu-remote-upgrade" \
     "$HOME/.local/bin/uu-agent" \
     "$HOME/.local/bin/uu-ssh" \

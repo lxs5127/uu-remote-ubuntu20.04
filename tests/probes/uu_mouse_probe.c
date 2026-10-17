@@ -1,4 +1,5 @@
 #define WIN32_LEAN_AND_MEAN
+#define _WIN32_WINNT 0x0601
 #include <windows.h>
 #include <stdio.h>
 
@@ -48,7 +49,7 @@ static BOOL read_all(HANDLE handle, void *buffer, DWORD size)
     return TRUE;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     input_bridge_request request;
     input_bridge_response response;
@@ -74,6 +75,17 @@ int main(void)
     inputs[5].type = INPUT_MOUSE;
     inputs[5].mi.mouseData = (DWORD)-WHEEL_DELTA;
     inputs[5].mi.dwFlags = MOUSEEVENTF_HWHEEL;
+
+    if (argc == 2) {
+        if (LoadLibraryA(argv[1]) == NULL) {
+            fprintf(stderr, "could not load input hook: %lu\n", (unsigned long)GetLastError());
+            return 1;
+        }
+        Sleep(500); /* The DLL installs its IAT hook on its worker thread. */
+        UINT result = SendInput(ACCEPTANCE_INPUTS, inputs, sizeof(INPUT));
+        printf("hook-requested=%lu result=%lu\n", (unsigned long)ACCEPTANCE_INPUTS, (unsigned long)result);
+        return result == ACCEPTANCE_INPUTS ? 0 : 1;
+    }
 
     if (!WaitNamedPipeW(INPUT_BRIDGE_PIPE, 5000)) {
         fprintf(stderr, "input broker pipe was not ready: %lu\n",

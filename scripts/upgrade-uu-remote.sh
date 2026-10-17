@@ -144,6 +144,14 @@ manager="$repo_dir/scripts/uu_update_manager.py"
 installer="$repo_dir/install.sh"
 verifier="$repo_dir/scripts/verify.sh"
 environment_file="$HOME/.config/uu-remote-bridge/environment"
+saved_wine_bin="$(
+    if [[ -f "$environment_file" ]]; then
+        /usr/bin/sed -n 's/^UURB_WINE_BIN=//p' "$environment_file" | /usr/bin/tail -n 1
+    fi
+)"
+wine_bin="${UURB_WINE_BIN:-${saved_wine_bin:-/opt/wine-stable/bin/wine}}"
+wineserver_bin="$(dirname -- "$wine_bin")/wineserver"
+export UURB_WINE_BIN="$wine_bin"
 saved_wine_prefix="$(
     if [[ -f "$environment_file" ]]; then
         /usr/bin/sed -n 's/^UURB_WINEPREFIX=//p' "$environment_file" | /usr/bin/tail -n 1
@@ -374,7 +382,7 @@ restore_runtime_backup() {
     log 'runtime refresh failed; restoring the post-promotion runtime copy'
     "${systemctl_user[@]}" stop uu-remote-bridge.service >/dev/null 2>&1 || true
     "$repo_dir/scripts/stop-wine-prefix" \
-        "$wine_prefix" /opt/wine-stable/bin/wineserver >/dev/null 2>&1 || true
+        "$wine_prefix" "$wineserver_bin" >/dev/null 2>&1 || true
     for item in "${backup_paths[@]}"; do
         relative="${item#/}"
         backup="$backup_dir/tree/$relative"

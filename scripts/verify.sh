@@ -27,12 +27,13 @@ server="$wine_prefix/drive_c/Program Files/Netease/GameViewer/bin/$(manifest_fie
 healthd="$wine_prefix/drive_c/Program Files/Netease/GameViewer/bin/$(manifest_field health_monitor.filename)"
 healthd_original_sha256="$(manifest_field health_monitor.original_sha256)"
 healthd_stub="$repo_dir/build/compat/uu-healthd-stub.exe"
-wine_bin="${UURB_WINE_BIN:-/opt/wine-stable/bin/wine}"
+saved_wine_bin="$(saved_setting UURB_WINE_BIN)"
+wine_bin="${UURB_WINE_BIN:-${saved_wine_bin:-/opt/wine-stable/bin/wine}}"
 uuyc_cli="$wine_prefix/drive_c/Program Files/Netease/GameViewer/bin/uuyc-cli.exe"
 devcon="$wine_prefix/drive_c/Program Files/Netease/GameViewer/bin/drivers/devcon.exe"
 devcon_backup="$devcon.uu-original"
 case "$release_version" in
-    4.33.0.8907|4.34.0.8979|4.39.1.1375|4.39.2.1561|4.42.0.2770)
+    4.33.0.8907|4.34.0.8979|4.39.1.1375|4.39.2.1561|4.42.0.2770|4.43.1.3614)
         devcon_original_sha256='46731d6ea59dd9b63ad641c79646bb5ff64e1b877a1226536e3fe34d1ab4ee10'
         ;;
     *)
@@ -80,6 +81,8 @@ saved_desktop_target="$(saved_setting UURB_DESKTOP_TARGET)"
 desktop_target="${UURB_DESKTOP_TARGET:-${saved_desktop_target:-auto}}"
 saved_desktop_relay="$(saved_setting UURB_DESKTOP_RELAY)"
 desktop_relay="${UURB_DESKTOP_RELAY:-${saved_desktop_relay:-rdp}}"
+saved_input_route="$(saved_setting UURB_INPUT_ROUTE)"
+input_route="${UURB_INPUT_ROUTE:-${saved_input_route:-legacy}}"
 saved_shared_vnc_port="$(saved_setting UURB_DESKTOP_VNC_PORT)"
 shared_vnc_port="${UURB_DESKTOP_VNC_PORT:-$saved_shared_vnc_port}"
 saved_keyboard_route="$(saved_setting UURB_KEYBOARD_ROUTE)"
@@ -290,8 +293,8 @@ display_geometry() {
     if [[ -n "$xauthority" ]]; then
         display_environment+=("XAUTHORITY=$xauthority")
     fi
-    "${display_environment[@]}" /usr/bin/xdotool getdisplaygeometry \
-        2>/dev/null | /usr/bin/awk 'NF == 2 {print $1 "x" $2}'
+    "${display_environment[@]}" /usr/bin/xdpyinfo \
+        2>/dev/null | /usr/bin/awk '$1 == "dimensions:" {print $2; exit}'
 }
 
 server_startup_ready() {
@@ -304,7 +307,7 @@ server_startup_ready() {
     [[ "$modified" =~ ^[0-9]+$ ]] || return 1
     ((modified >= service_start_epoch)) || return 1
     case "$release_version" in
-        4.39.1.1375|4.39.2.1561|4.42.0.2770)
+        4.39.1.1375|4.39.2.1561|4.42.0.2770|4.43.1.3614)
             signature="$(
                 /usr/bin/od -An -tx1 -N8 "$latest_server_log" 2>/dev/null |
                     /usr/bin/tr -d '[:space:]'
@@ -327,7 +330,7 @@ structured_release_ipc_ready() {
     local private_display
 
     case "$release_version" in
-        4.39.1.1375|4.39.2.1561|4.42.0.2770) ;;
+        4.39.1.1375|4.39.2.1561|4.42.0.2770|4.43.1.3614) ;;
         *) return 0 ;;
     esac
     [[ -x "$wine_bin" && -f "$uuyc_cli" ]] || return 1
@@ -341,7 +344,11 @@ structured_release_ipc_ready() {
             WINEDEBUG=-all \
             WINEDLLOVERRIDES='winedbg.exe=d;mscoree,mshtml=' \
             "$wine_bin" "$uuyc_cli" version 2>/dev/null |
-            /usr/bin/tr -d '\r' | /usr/bin/tail -n 1
+            /usr/bin/tr -d '\r' |
+            /usr/bin/awk '
+                $1 == "cliVersion:" { print $2; exit }
+                /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }
+            '
     )"
     [[ "$cli_version" == "$release_version" ]]
 }
@@ -422,7 +429,7 @@ service_start_epoch="$(
 latest_server_log=''
 server_log_pattern='log_*.txt'
 case "$release_version" in
-    4.39.1.1375|4.39.2.1561|4.42.0.2770) server_log_pattern='log_*.slog' ;;
+    4.39.1.1375|4.39.2.1561|4.42.0.2770|4.43.1.3614) server_log_pattern='log_*.slog' ;;
 esac
 for _ in {1..240}; do
     latest_server_log="$(
@@ -639,6 +646,15 @@ elif [[ "$active_keyboard_route" == x11 ]]; then
     fi
 else
     pass 'compatible RDP physical-key route is active'
+fi
+
+if [[ "$desktop_relay" == vnc && "$input_route" == legacy && "$active_keyboard_route" == x11 ]]; then
+    if grep -q 'UU direct X11 mouse and keyboard input bridge active' "$bridge_log" &&
+       grep -Fq "$wine_prefix/compat/uu-input-bridge-x11.dll" "/proc/$cursor_server_pid/maps"; then
+        pass 'remote VNC mouse and keyboard INPUTs use the authenticated native X11 bridge'
+    else
+        fail 'remote VNC input is not using the native X11 bridge'
+    fi
 fi
 
 if [[ "$active_keyboard_route" == x11 && "$phone_text_mode" != keys ]]; then

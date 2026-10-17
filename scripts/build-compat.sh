@@ -14,6 +14,9 @@ winegcc="${WINEGCC:-/opt/wine-stable/bin/winegcc}"
 host_cc="${HOST_CC:-gcc}"
 host_strip="${HOST_STRIP:-strip}"
 common=(-std=c11 -O2 -Wall -Wextra -Werror)
+# Ubuntu 20.04's MinGW headers default to MSVCRT printf checking. Enable
+# MinGW's C99 formatting for the existing %llu/%zu calls in Windows tools.
+pe_common=("${common[@]}" -D__USE_MINGW_ANSI_STDIO=1 -D_WIN32_WINNT=0x0601)
 pe_link=(-Wl,--no-insert-timestamp)
 
 for command in "$cc" "$strip" "$winegcc" "$host_cc" "$host_strip"; do
@@ -28,27 +31,30 @@ input_sdk="$repo_dir/vendor/freerdp-input-sdk/include"
 input_flags=(-D__STDC_NO_THREADS__=1 -D_WIN32_WINNT=0x0601 -Wpedantic -isystem "$input_sdk")
 mkdir -p "$output_dir"
 
-"$cc" "${common[@]}" "${input_flags[@]}" "${pe_link[@]}" -shared \
+"$cc" "${pe_common[@]}" "${input_flags[@]}" "${pe_link[@]}" -shared \
     -o "$output_dir/uu-input-bridge.dll" \
     "$repo_dir/src/uu_input_bridge_legacy.c" "$repo_dir/src/uurb_ready.c" -luser32
-"$cc" "${common[@]}" "${input_flags[@]}" "${pe_link[@]}" -shared \
+"$cc" "${pe_common[@]}" "${input_flags[@]}" "${pe_link[@]}" -shared \
+    -DUURB_NATIVE_X11_INPUT=1 -o "$output_dir/uu-input-bridge-x11.dll" \
+    "$repo_dir/src/uu_input_bridge_legacy.c" "$repo_dir/src/uurb_ready.c" -luser32
+"$cc" "${pe_common[@]}" "${input_flags[@]}" "${pe_link[@]}" -shared \
     -o "$output_dir/uu-input-bridge-public.dll" \
     "$repo_dir/src/uu_input_bridge.c" "$repo_dir/src/uurb_ready.c" -luser32
-"$cc" "${common[@]}" "${pe_link[@]}" -shared \
+"$cc" "${pe_common[@]}" "${pe_link[@]}" -shared \
     -o "$output_dir/uu-cursor-guard.dll" \
     "$repo_dir/src/uu_cursor_guard.c" -luser32 -lgdi32
-"$cc" "${common[@]}" "${input_flags[@]}" "${pe_link[@]}" -municode -mwindows \
+"$cc" "${pe_common[@]}" "${input_flags[@]}" "${pe_link[@]}" -municode -mwindows \
     -o "$output_dir/uu-input-broker.exe" \
     "$repo_dir/src/uu_input_broker.c" "$repo_dir/src/uurb_rdp_backend.c" \
     "$repo_dir/src/uurb_ready.c" "$repo_dir/src/full-input.c" -luser32 -lws2_32
-"$cc" "${common[@]}" "${input_flags[@]}" "${pe_link[@]}" -shared \
+"$cc" "${pe_common[@]}" "${input_flags[@]}" "${pe_link[@]}" -shared \
     -o "$output_dir/uurb-full-input-client.dll" \
     "$repo_dir/src/plugin.c" "$repo_dir/src/freerdp-adapter.c" \
     "$repo_dir/src/full-input.c" "$repo_dir/src/uurb_ready.c" -lbcrypt
-"$cc" "${common[@]}" "${input_flags[@]}" "${pe_link[@]}" \
+"$cc" "${pe_common[@]}" "${input_flags[@]}" "${pe_link[@]}" \
     -o "$output_dir/uu-input-broker-probe.exe" \
     "$repo_dir/src/uu-input-broker-probe.c" "$repo_dir/src/uurb_ready.c"
-"$cc" "${common[@]}" "${input_flags[@]}" -M \
+"$cc" "${pe_common[@]}" "${input_flags[@]}" -M \
     "$repo_dir/src/plugin.c" "$repo_dir/src/freerdp-adapter.c" \
     >"$output_dir/full-input-header-dependencies.txt"
 if grep -Fq 'freerdp/build-config.h' "$output_dir/full-input-header-dependencies.txt" || \
@@ -56,29 +62,29 @@ if grep -Fq 'freerdp/build-config.h' "$output_dir/full-input-header-dependencies
     printf 'Unexpected build-config dependency in public input SDK.\n' >&2
     exit 1
 fi
-"$cc" "${common[@]}" "${pe_link[@]}" -municode \
+"$cc" "${pe_common[@]}" "${pe_link[@]}" -municode \
     -o "$output_dir/uu-injector.exe" \
     "$repo_dir/src/uu_injector.c"
-"$cc" "${common[@]}" "${pe_link[@]}" -municode \
+"$cc" "${pe_common[@]}" "${pe_link[@]}" -municode \
     -o "$output_dir/uu-service-control.exe" \
     "$repo_dir/src/uu_service_control.c" -ladvapi32
-"$cc" "${common[@]}" "${pe_link[@]}" \
+"$cc" "${pe_common[@]}" "${pe_link[@]}" \
     -o "$output_dir/uu-display-mode.exe" \
     "$repo_dir/src/uu_display_mode.c" -luser32
-"$cc" "${common[@]}" "${pe_link[@]}" -municode \
+"$cc" "${pe_common[@]}" "${pe_link[@]}" -municode \
     -I "$repo_dir/src" \
     -o "$output_dir/uu-wine-clipboard-bridge.exe" \
     "$repo_dir/src/uu_wine_clipboard_bridge.c" -lws2_32
-"$cc" "${common[@]}" "${pe_link[@]}" -I "$repo_dir/src" \
+"$cc" "${pe_common[@]}" "${pe_link[@]}" -I "$repo_dir/src" \
     -o "$output_dir/uu-terminal-proxy.exe" \
     "$repo_dir/src/uu_terminal_proxy.c" -lws2_32 -lshell32
-"$cc" "${common[@]}" "${pe_link[@]}" -shared \
+"$cc" "${pe_common[@]}" -U_WIN32_WINNT -DNTDDI_VERSION=0x0A000006 "${pe_link[@]}" -shared \
     -o "$output_dir/uu-conpty-compat.dll" \
     "$repo_dir/src/uu_conpty_compat.c" "$repo_dir/src/uu_conpty_compat.def" -lws2_32 -lshell32
-"$cc" "${common[@]}" "${pe_link[@]}" -mwindows \
+"$cc" "${pe_common[@]}" "${pe_link[@]}" -mwindows \
     -o "$output_dir/uu-healthd-stub.exe" \
     "$repo_dir/src/winlogon.c"
-"$cc" "${common[@]}" "${pe_link[@]}" -shared \
+"$cc" "${pe_common[@]}" "${pe_link[@]}" -shared \
     -o "$output_dir/winpr-sspi-shim.dll" \
     "$repo_dir/src/winpr_sspi_shim.c"
 "$host_cc" "${common[@]}" -fPIC -shared \
@@ -87,6 +93,9 @@ fi
 "$host_cc" "${common[@]}" -Wpedantic -fPIC -shared \
     -o "$output_dir/uu-manager-capture.so" \
     "$repo_dir/src/uu_manager_capture.c" -ldl -pthread
+"$host_cc" "${common[@]}" -Wpedantic -fPIC -shared \
+    -o "$output_dir/uu-vnc-relay-guard.so" \
+    "$repo_dir/src/uu_vnc_relay_guard.c" -ldl -pthread
 "$host_cc" "${common[@]}" -I "$repo_dir/src" \
     -o "$output_dir/uu-x11-input" \
     "$repo_dir/src/uu_x11_input.c" -ldl
@@ -101,6 +110,7 @@ fi
     "$output_dir/uu-cursor-guard.dll" \
     "$output_dir/uu-display-mode.exe" \
     "$output_dir/uu-input-bridge.dll" \
+    "$output_dir/uu-input-bridge-x11.dll" \
     "$output_dir/uu-input-bridge-public.dll" \
     "$output_dir/uu-input-broker.exe" \
     "$output_dir/uurb-full-input-client.dll" \
@@ -115,6 +125,7 @@ fi
 "$host_strip" \
     "$output_dir/uu-network-filter.so" \
     "$output_dir/uu-manager-capture.so" \
+    "$output_dir/uu-vnc-relay-guard.so" \
     "$output_dir/uu-x11-input" \
     "$output_dir/uu-x11-clipboard" \
     "$output_dir/uu-terminal-bridge"

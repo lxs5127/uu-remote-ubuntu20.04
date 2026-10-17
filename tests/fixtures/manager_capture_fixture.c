@@ -487,10 +487,12 @@ static void test_isolated_input(void *module)
     int (*key)(MCDisplay *, unsigned int, int, unsigned long);
     MCWindow focused;
     MCWindowAttributes attributes;
-    int revert, clicks = 0, keys = 0;
+    int revert, clicks = 0, keys = 0, motions = 0;
     symbol(module, "XTestFakeMotionEvent", &motion, sizeof(motion));
     symbol(module, "XTestFakeButtonEvent", &button, sizeof(button));
     symbol(module, "XTestFakeKeyEvent", &key, sizeof(key));
+    x.select(display, main_window, (1L << 0) | (1L << 2) | (1L << 6));
+    x.select(display, relay, (1L << 0) | (1L << 2) | (1L << 6));
     /* The mapped manager may raise itself; the real desktop still shows SDL.
      * Its separate capture remains readable without a root compositor. */
     x.raise(display, frame);
@@ -501,11 +503,20 @@ static void test_isolated_input(void *module)
         x.destroy_image(image);
         assert_root_pixel(module, 80, 80, 0x00ff00);
         assert(x.attributes(display, main_window, &attributes) && attributes.map_state == 2);
+        x.raise(display, relay);  /* The desktop supervisor raises its viewer. */
         x.set_focus(display, relay, 1, 0);
-        assert(motion(display, -1, 80, 80, 0));
+        assert(motion(display, -1, 80 + index, 80, 0));
         x.sync(display, 0);
         x.focus(display, &focused, &revert);
         assert(focused == relay);  /* Hover cannot steal desktop input. */
+        while (x.pending(display)) {
+            Event event;
+            x.event(display, &event);
+            if (event.any.type == 6) {
+                assert(event.any.window == main_window); /* Never feed the desktop VNC loop. */
+                ++motions;
+            }
+        }
         assert(button(display, 1, 1, 0));
         x.set_focus(display, relay, 1, 0);  /* A competing supervisor tick. */
         assert(button(display, 1, 0, 0));
@@ -524,7 +535,7 @@ static void test_isolated_input(void *module)
             }
         }
     }
-    assert(clicks == 8 && keys == 8);
+    assert(clicks == 8 && keys == 8 && motions >= 8);
     dlclose(module);
     x.clear(display, main_window);
     wait_server();

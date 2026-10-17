@@ -6,8 +6,13 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 default_prefix="$HOME/.local/share/wineprefixes/uu-remote"
 wine_prefix="$default_prefix"
-wine_bin="${WINE_BIN:-/opt/wine-stable/bin/wine}"
-wineserver_bin="${WINESERVER_BIN:-/opt/wine-stable/bin/wineserver}"
+saved_wine_bin=""
+if [[ -f "$HOME/.config/uu-remote-bridge/environment" ]]; then
+    saved_wine_bin="$(/usr/bin/sed -n 's/^UURB_WINE_BIN=//p' \
+        "$HOME/.config/uu-remote-bridge/environment" | /usr/bin/tail -n 1)"
+fi
+wine_bin="${WINE_BIN:-${UURB_WINE_BIN:-${saved_wine_bin:-/opt/wine-stable/bin/wine}}}"
+wineserver_bin="${WINESERVER_BIN:-$(dirname -- "$wine_bin")/wineserver}"
 manage_service=false
 systemctl_user=(
     /usr/bin/env

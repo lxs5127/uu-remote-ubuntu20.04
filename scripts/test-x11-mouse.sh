@@ -3,6 +3,13 @@
 set -Eeuo pipefail
 
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+bridge_hook=false
+if [[ "${1:-}" == --bridge-hook && "$#" == 1 ]]; then
+    bridge_hook=true
+elif (($#)); then
+    printf 'usage: test-x11-mouse.sh [--bridge-hook]\n' >&2
+    exit 2
+fi
 temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/uurb-x11-mouse.XXXXXX")"
 wine_prefix="$temporary_dir/wine"
 ready_file="$temporary_dir/x11-input.port"
@@ -105,9 +112,16 @@ DISPLAY="$display" WINEPREFIX="$wine_prefix" WINEDEBUG=-all \
 broker_pid=$!
 sleep 0.5
 
+probe_arguments=()
+if [[ "$bridge_hook" == true ]]; then
+    hook_windows="$(DISPLAY="$display" WINEPREFIX="$wine_prefix" WINEDEBUG=-all \
+        /opt/wine-stable/bin/winepath -w "$temporary_dir/compat/uu-input-bridge-x11.dll")"
+    probe_arguments=("$hook_windows")
+fi
+
 DISPLAY="$display" WINEPREFIX="$wine_prefix" WINEDEBUG=-all \
     WINEDLLOVERRIDES='mscoree,mshtml=' \
-    /opt/wine-stable/bin/wine "$temporary_dir/uu-mouse-probe.exe"
+    /opt/wine-stable/bin/wine "$temporary_dir/uu-mouse-probe.exe" "${probe_arguments[@]}"
 sleep 0.2
 
 python3 - "$display" "$temporary_dir/xev.log" <<'PY'

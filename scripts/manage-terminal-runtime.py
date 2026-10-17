@@ -11,6 +11,8 @@ import tempfile
 VENDOR_CONPTY_SHA256 = "c46dcd04f52b97f6a8cf53e8f547c85a821660bed18de2b3344afcd4a8389ad6"
 TRIAL_CONPTY_SHA256 = "22a8b0195e2dc6a4e12199b240be36a6a41232fb4c9a0eea23b116679f32f80d"
 VENDOR_MUX_SHA256 = "ea50a845e3e614e87b57a98656ba9c391ed8c4cddc673647f9e2e9ac20a978d5"
+# UU 4.43.1.3614 from the hash-pinned official installer recorded in its manifest.
+VENDOR_MUX_4431_SHA256 = "d3eed5449ed64166c30b1fb7541630d0bd3f4c8f14eeaa99634eacd46534d5b4"
 
 
 def digest(path: Path) -> str:
@@ -95,12 +97,13 @@ class TerminalRuntime:
                     atomic_copy(self.shell_original, self.shell)
 
     def check_mux(self) -> None:
-        if self.mux_vendor.exists() and digest(self.mux_vendor) != VENDOR_MUX_SHA256:
+        vendor_hashes = (VENDOR_MUX_SHA256, VENDOR_MUX_4431_SHA256)
+        if self.mux_vendor.exists() and digest(self.mux_vendor) not in vendor_hashes:
             raise ValueError("Unmanaged terminal vendor MUX runner")
-        if self.mux_original.exists() and digest(self.mux_original) != VENDOR_MUX_SHA256:
+        if self.mux_original.exists() and digest(self.mux_original) not in vendor_hashes:
             raise ValueError("MUX vendor backup differs from the audited build")
         if self.mux.exists():
-            if digest(self.mux) == VENDOR_MUX_SHA256:
+            if digest(self.mux) in vendor_hashes:
                 return
             if self.mux_original.exists() and same(self.mux, self.mux_managed):
                 return

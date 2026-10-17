@@ -1,0 +1,10 @@
+[Unit]
+Description=UU Remote host tray indicator
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/libexec/uu-remote-tray.py
+Restart=on-failure
+RestartSec=10

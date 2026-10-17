@@ -1178,10 +1178,52 @@ static int focus_for_input(MCDisplay *display, int motion, int x, int y, int key
         /* An override-redirect menu keeps its existing focus/grab owner.
          * Focusing its temporary client can terminate Wine's menu loop before
          * the following XTest press. Managed main/modal windows still focus. */
-        if (!attributes.override_redirect && (!isolated_manager || !motion)) {
+        if (!attributes.override_redirect) {
+            /* Composite redirection hides pixels, not the input window. Put
+             * the owned frame above the relay before moving the shared X
+             * pointer; otherwise hover reaches its VNC viewer and loops back
+             * into the physical desktop. Keep keyboard focus on hover. */
             api.raise_window(display, target->frame);
-            api.set_input_focus(display, target->client, 1, 0);
-            last_input_window = target->client;
+            if (isolated_manager && !keyboard) {
+                /* The WM owns the frame; raising the reparented client only
+                 * changes stacking inside that frame. Ask the WM to restack
+                 * its managed client, then wait before injecting motion. */
+                MCEvent restack = {0};
+                restack.message.type = 33; /* ClientMessage */
+                restack.message.display = display;
+                restack.message.window = target->client;
+                restack.message.message_type = api.intern_atom(display, "_NET_RESTACK_WINDOW", 0);
+                restack.message.format = 32;
+                restack.message.data.longs[0] = 2; /* local management tool */
+                restack.message.data.longs[2] = 0; /* Above, without a sibling */
+                api.send_event(display, root, 0, (1L << 19) | (1L << 20), &restack);
+                api.sync(display, 0);
+                int above = 0;
+                for (unsigned int attempt = 0; attempt < 25; ++attempt) {
+                    MCWindow hit = 0;
+                    int translated_x, translated_y;
+                    begin_requests();
+                    int translated = api.translate(private_display, root, root, pointer_x, pointer_y,
+                                                    &translated_x, &translated_y, &hit);
+                    int valid = end_requests();
+                    if (!valid)
+                        break;
+                    if (translated && hit == target->frame) {
+                        above = 1;
+                        break;
+                    }
+                    struct timespec pause = {0, 1000000};
+                    nanosleep(&pause, NULL);
+                }
+                if (!above) {
+                    routed = -1;
+                    goto done;
+                }
+            }
+            if (!isolated_manager || !motion) {
+                api.set_input_focus(display, target->client, 1, 0);
+                last_input_window = target->client;
+            }
         }
     }
 done:

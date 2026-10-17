@@ -17,6 +17,12 @@ typedef HINSTANCE(WINAPI *shell_execute_fn)(HWND, LPCWSTR, LPCWSTR,
 #define INPUT_BRIDGE_MAX_INPUTS 2048UL
 #define INPUT_BRIDGE_PIPE L"\\\\.\\pipe\\uurb-input-v1"
 
+#ifdef UURB_NATIVE_X11_INPUT
+#define NATIVE_X11_INPUT TRUE
+#else
+#define NATIVE_X11_INPUT FALSE
+#endif
+
 typedef struct input_bridge_request {
     DWORD magic;
     DWORD count;
@@ -580,7 +586,7 @@ static UINT WINAPI bridged_send_input(UINT count, LPINPUT inputs, int size)
 
     started_ms = GetTickCount64();
 
-    relay = public_rdp_route() ? NULL : find_relay_window();
+    relay = public_rdp_route() || NATIVE_X11_INPUT ? NULL : find_relay_window();
     if (relay != NULL)
         SetForegroundWindow(relay);
 
@@ -598,7 +604,7 @@ static UINT WINAPI bridged_send_input(UINT count, LPINPUT inputs, int size)
                                             INPUT_KEYBOARD);
     mouse_input = !unicode_keyboard && !physical_keyboard &&
                   contains_input_type(count, inputs, size, INPUT_MOUSE);
-    if (unicode_keyboard || public_rdp_route()) {
+    if (unicode_keyboard || public_rdp_route() || NATIVE_X11_INPUT) {
         broker_started_ms = GetTickCount64();
         result = send_through_broker(count, inputs, size, &error);
         broker_ms = (DWORD)(GetTickCount64() - broker_started_ms);
@@ -743,6 +749,8 @@ static DWORD WINAPI initialize_bridge(void *unused)
     open_log();
     InitializeCriticalSection(&broker_lock);
     broker_lock_initialized = TRUE;
+    if (NATIVE_X11_INPUT)
+        write_log("UU direct X11 mouse and keyboard input bridge active\r\n");
     input_patched = patch_import(
         GetModuleHandleW(NULL), "USER32.dll", "SendInput",
         (uintptr_t)&bridged_send_input, &original_send_input);
